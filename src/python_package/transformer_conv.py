@@ -85,16 +85,17 @@ if __name__ == "__main__":
     in_channels = 3
     out_channels = 32
     kernel_size = 3
-    dilation = 2
+    dilation = 1
     padding = 1
     stride = 1
     nhead=4
-    embedding_dim = 12
-    dim_feedforward = 24
+    embedding_dim = 4
+    dim_feedforward = 8
     
-    img_size = (4,4)
+    img_size = (16,16)
     batch_size = 2
-    input_tensor = torch.arange(batch_size * in_channels * img_size[0] * img_size[1]).reshape(batch_size, in_channels, img_size[0], img_size[1]).float()
+    # input_tensor = torch.arange(batch_size * in_channels * img_size[0] * img_size[1]).reshape(batch_size, in_channels, img_size[0], img_size[1]).float()
+    input_tensor = torch.randn(batch_size, in_channels, img_size[0], img_size[1])
 
     # point_wise_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
     standard_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, dilation=dilation, padding=padding, stride=stride)
