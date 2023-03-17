@@ -25,11 +25,13 @@ def scale_clip(min_scale, max_scale):
     return _pq().apply
 
 class RemapLayer(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim=1, min_scale=2.5, max_scale=3.5):
+    def __init__(self, num_embeddings, embedding_dim=1, min_scale=2.5, max_scale=3.5, initial_scale=5., unsigned=False):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.value_embeddings = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
-        self.scale = torch.nn.Parameter(torch.tensor((max_scale + min_scale) / 2))
+        self.unsigned = unsigned
+        # self.scale = torch.nn.Parameter(torch.tensor((max_scale + min_scale) / 2))
+        self.scale = torch.nn.Parameter(torch.tensor(initial_scale))
         self.min_scale = min_scale
         self.max_scale = max_scale
         self.scale_clipper = scale_clip(min_scale, max_scale)
@@ -39,12 +41,17 @@ class RemapLayer(nn.Module):
         # clip scales
         scale = self.scale_clipper(self.scale)
 
-        # normalize inputs
-        out = (x - x.mean()) / x.std()
 
-        # map range to 0,1
-        out_01 = out.clamp(min=-scale, max=scale).div(scale).add(1).div(2)
+        if self.unsigned:
+            # map range to 0,1
+            out_01 = x.clamp(min=torch.tensor(0), max=scale).div(scale)
+        else:
+            # normalize inputs
+            out = (x - x.mean()) / x.std()
 
+            # map range to 0,1
+            out_01 = out.clamp(min=-scale, max=scale).div(scale).add(1).div(2)
+            
         # map range to 0, num_embeddings
         out3 = out_01 * (self.num_embeddings - 1)
 
@@ -68,35 +75,35 @@ class RemapLayer(nn.Module):
 
 if __name__ == "__main__":
 
-    num_embeddings = 1024
+    num_embeddings = 256
     embedding_dim = 1
     offset = 0.0
     scale = 3.0
     
-    batch_size = 1
-    num_channels = 3
+    batch_size = 2
+    num_channels = 2
     img_size = (16,16)
+    # input_tensor = torch.relu(torch.randn(batch_size, num_channels, img_size[0], img_size[1]))
     input_tensor = torch.randn(batch_size, num_channels, img_size[0], img_size[1])
 
-
-    model = RemapLayer(num_embeddings=num_embeddings)
+    model = RemapLayer(num_embeddings=num_embeddings, unsigned=False)
     
-    lr = 0.1
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    lr = 0.5
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
     y_true = 5 * input_tensor ** 3 + 3 * input_tensor + 1
+    y_true = y_true + (torch.randn_like(y_true)**2) * 0.1
 
-    for i in range(5000):
+    for i in range(1000):
         optimizer.zero_grad()
         y_pred = model(input_tensor)
 
         loss = criterion(y_true, y_pred)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
         optimizer.step()
 
-        if i % 100 == 0:
+        if i % 10 == 0:
             print(f"loss: {loss.item()}, scale: {model.scale.item()}")
 
 
