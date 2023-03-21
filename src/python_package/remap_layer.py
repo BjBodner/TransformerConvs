@@ -4,41 +4,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.autograd import Variable, Function
 # TODO - perhaps make this a double layer, to addapt to distributions, or use a gaussian prior
-# TODO - Try reducing the number of parameters to make it look better
-
-
-# def clamp(min_val, max_val):
-#     class Clamp(Function):
-#         @staticmethod
-#         def forward(ctx, i):
-#             ctx._mask = (i.ge(min_val) * i.le(max_val))
-#             return i.clamp(min_val, max_val)
-
-#         @staticmethod
-#         def backward(ctx, grad_output):
-#             mask = Variable(ctx._mask.type_as(grad_output.data))
-#             return grad_output * mask
-
-#     return Clamp().apply
 
 
 class Clamp(Function):
 
     @staticmethod
-    def forward(ctx, i, min, max):
-        ctx._mask = (i.ge(min) * i.le(max))
-        ctx.scale_dim = min.shape
-        return i.clamp(min, max)
+    def forward(ctx, i, scale):
+        # ctx._mask = (i.ge(min.detach()) * i.le(max.detach()))
+        ctx._mask = i.div(scale).abs().le(1)
+        ctx.scale_dim = scale.shape
+        ctx.input = i
+        # This is where the extra source of the scale gradient comes from, need to do this with an STE
+        # so that the gradient flows normally to the input, and doesn't affect the scales
+        return i.clamp(-scale.detach(), scale.detach()) 
 
     @staticmethod
     def backward(ctx, grad_output):
         mask = Variable(ctx._mask.type_as(grad_output.data))
-        if ctx.scale_dim == (1,):
-            min_max_val_grad = 1 - mask.mean().reshape(ctx.scale_dim)
+        sign = torch.sign(ctx.input)
+
+        grad_scale = (1 - mask) * grad_output * sign
+        # grad_scale = 1 - mask  
+        if ctx.scale_dim[1] == 1:
+            min_max_val_grad = grad_scale.mean().reshape(ctx.scale_dim)
         else:
-            min_max_val_grad = 1 - mask.mean((0, 2, 3)).reshape(ctx.scale_dim) # currently assumes 4d tensor
+            min_max_val_grad = grad_scale.mean((0, 2, 3)).reshape(ctx.scale_dim) # currently assumes 4d tensor
         # print(min_max_val_grad)
-        return grad_output * mask, -min_max_val_grad, min_max_val_grad
+        min_max_val_grad = min_max_val_grad
+        return grad_output, min_max_val_grad
 
 
 def scale_clip(min_scale, max_scale):
@@ -55,10 +48,11 @@ def scale_clip(min_scale, max_scale):
 
             penalty_grad = (scale - max_scale).clamp(min=0) + (scale - min_scale).clamp(max=0)
             # grad_scale = (grad_input * penalty_grad).sum()
-            grad_scale = grad_input * penalty_grad
+            grad_scale =  penalty_grad * grad_input
             # grad_scale = -grad_input 
             # grad_scale = penalty_grad
             # print(grad_scale)
+            # grad_scale = 0.000001 * grad_scale
             return grad_scale
 
 
@@ -90,8 +84,8 @@ class RemapLayer(nn.Module):
 
     def update_min_max(self, x):
         # update min and max
-        self.min_scale = self.min_scale * self.min_max_momentum + x.std() * (1 - self.min_max_momentum)
-        self.max_scale = self.max_scale * self.min_max_momentum + x.max() * (1 - self.min_max_momentum)
+        self.min_scale = self.min_scale * self.min_max_momentum + 2 * x.std() * (1 - self.min_max_momentum)
+        self.max_scale = self.max_scale * self.min_max_momentum + x.abs().max() * (1 - self.min_max_momentum)
 
     def forward(self, x):
 
@@ -104,8 +98,8 @@ class RemapLayer(nn.Module):
             out_01 = x.clamp(min=torch.tensor(0), max=scale).div(scale)
         else:
             # map range to 0,1
-            # out_01 = x.clamp(min=-scale, max=scale).div(scale).add(1).div(2)
-            out_01 = self.clamp(x,-scale, scale).div(scale).add(1).div(2)
+            # out_01 = x.clamp(min=-scale, max=scale).div(scale.detach()).add(1).div(2)
+            out_01 = self.clamp(x, scale).div(scale).add(1).div(2)
             
         # map range to 0, num_embeddings
         out3 = out_01 * (self.num_embeddings_per_channel - 1)
@@ -144,27 +138,34 @@ if __name__ == "__main__":
     num_channels = 4
     img_size = (32,32)
     # input_tensor = torch.relu(torch.randn(batch_size, num_channels, img_size[0], img_size[1]))
-    input_tensor = 2.5 * torch.randn(batch_size, num_channels, img_size[0], img_size[1])
-
-    model = RemapLayer(num_embeddings=num_embeddings, in_channels=num_channels, min_scale=2.5, max_scale=3.5, initial_scale=5., unsigned=False)
     
-    lr = 0.5
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    input_scale = 1.
+    
+    for experiment in range(10):
+        print("\n\nExperiment: ", experiment)
+        model = RemapLayer(num_embeddings=num_embeddings, in_channels=num_channels, min_scale=2.5, max_scale=3.5, initial_scale=5., unsigned=False)
+        
+        lr = 0.5
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        criterion = nn.MSELoss()
 
-    y_true = 0.5 * input_tensor ** 3 + 0.1 * input_tensor ** 2 + 3 * input_tensor + 1
-    y_true = y_true + (torch.randn_like(y_true)**2) * 0.1
 
-    for i in range(1000):
-        optimizer.zero_grad()
-        y_pred = model(input_tensor)
+        for i in range(200):
 
-        loss = criterion(y_true, y_pred)
-        loss.backward()
-        optimizer.step()
+            input_tensor = input_scale * torch.randn(batch_size, num_channels, img_size[0], img_size[1])
+            y_true = 0.5 * input_tensor ** 3 + 0.1 * input_tensor ** 2 + 3 * input_tensor + 1
+            y_true = y_true + (torch.randn_like(y_true)**2) * 0.1
 
-        if i % 10 == 0:
-            print(f"loss: {loss.item()}, scale: {model.scale.mean()}")
+
+            optimizer.zero_grad()
+            y_pred = model(input_tensor)
+
+            loss = criterion(y_true, y_pred)
+            loss.backward()
+            optimizer.step()
+
+            if i % 10 == 0:
+                print(f"loss: {loss.item()}, scale: {model.scale.mean()}")
 
 
     out = model(input_tensor)
